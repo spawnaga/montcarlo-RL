@@ -13,7 +13,7 @@ This is a simple implementation of a trading agent that uses a Monte Carlo Reinf
 
 ## Usage
 
-To run the code, simply execute the `main()` function in `monte_carlo_rl.py`. The script will download historical market data or use a csv file for a futures contract and use it to train the trading agent. The training process can take several hours depending on the length of the historical data and the complexity of the neural network.
+To run the code, simply execute the `main()` function in `monte_carlo_rl.py`. The script will download historical market data, use a csv or a SQL file for a futures contract and use it to train the trading agent. The training process can take several hours depending on the length of the historical data and the complexity of the neural network.
 
 ## Disclaimer
 
