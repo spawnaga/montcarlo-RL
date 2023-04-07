@@ -394,6 +394,7 @@ def main():
 
     finally:
         agent.save_model(pre_trained_model_path)
+        agent.save_replay_buffer(pre_trained_model_path)
 
 
 if __name__ == "__main__":
