@@ -45,8 +45,7 @@ def load_data(file_path, chunk_size=10000):
 class Market:
     """Class for handling market data"""
 
-    def __init__(self, proxy=None, ibkr=False, database_path=r"E:\Projects\Market_depth_trend_predicition-main"
-                                                             r"\MarketDepth_data_sample.csv"):
+    def __init__(self, proxy=None, ibkr=False, database_path=r".\MarketDepth_data_sample.csv"):
         self.df = None
         self.state_df = None
         self.db = sqlite3.connect(database_path)
@@ -294,19 +293,18 @@ def main():
 
     # Register the signal handler
     signal.signal(signal.SIGINT, signal_handler)
-    data_generator = preprocess_data(ibkr=False,
-                                     file_path=r"E:\Projects\Market_depth_trend_predicition-main\CL_ticks.db")
+    data_generator = preprocess_data(ibkr=False, file_path=r".\CL_ticks.db")
     data, _ = next(data_generator)
     input_size = data.shape[1]
     output_size = 3  # Hold, Buy (Long), or Sell (Short)
     agent = TradingAgent(input_size, output_size)
 
     # Load a pre-trained model before starting the training loop, if it exists
-    pre_trained_model_path = r"C:\Users\alial\PycharmProjects\montcarlo-RL\model.pth"
+    pre_trained_model_path = r".\model.pth"
     agent.load_model(pre_trained_model_path)
 
     # Load the saved replay buffer, if it exists
-    replay_buffer_file_path = r"C:\Users\alial\PycharmProjects\montcarlo-RL\replay_buffer.pkl"
+    replay_buffer_file_path = r".\replay_buffer.pkl"
     agent.load_replay_buffer(replay_buffer_file_path)
 
     starting_balance = 1000000

@@ -1,3 +1,1 @@
-<<<<<<< HEAD
 NQ_ticks.db filter=lfs diff=lfs merge=lfs -text
->>>>>>> 90bbc7b (Add SQL market depth for NQ ticks)
