@@ -1,3 +1,4 @@
+import csv
 import pickle
 import random as rnd
 import sqlite3
@@ -16,40 +17,15 @@ import signal
 import sys
 
 
-def load_data(file_path, chunk_size=10000):
-    _, file_extension = os.path.splitext(file_path)
-
-    if file_extension == '.csv':
-        for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-            chunk.rename(columns={"lastPrice": 'close'}, inplace=True)
-            chunk.dropna(inplace=True)
-            yield chunk
-    elif file_extension == '.db':
-        connection = sqlite3.connect(file_path)
-
-        # Calculate the total number of rows in the table
-        total_rows = pd.read_sql_query("SELECT COUNT(*) FROM NQ_market_depth", connection).iloc[0, 0]
-
-        for offset in range(0, total_rows, chunk_size):
-            query = f"SELECT * FROM NQ_market_depth LIMIT {chunk_size} OFFSET {offset}"
-            chunk = pd.read_sql_query(query, connection)
-            chunk.rename(columns={"lastPrice": 'close'}, inplace=True)
-            chunk.dropna(inplace=True)
-            yield chunk
-
-        connection.close()
-    else:
-        raise ValueError(f"Unsupported file type: {file_extension}")
-
-
 class Market:
     """Class for handling market data"""
 
-    def __init__(self, proxy=None, ibkr=False, database_path=r".\MarketDepth_data_sample.csv"):
+    def __init__(self, proxy=None, ibkr=False, database_path=r".\NQ_ticks.db"):
         self.df = None
         self.state_df = None
         self.db = sqlite3.connect(database_path)
         self.scaler = MinMaxScaler()
+        self.offset = 0
 
         if ibkr:
             if proxy is None:
@@ -139,6 +115,15 @@ class Market:
         state = state.reshape(1, -1)
         return state
 
+    def load_data_chunk(self, file_path, table_name, chunksize):
+
+        query = f'SELECT * FROM {table_name} LIMIT {chunksize} OFFSET {self.offset}'
+        df = pd.read_sql_query(query, self.db)
+        df.rename(columns={"lastPrice": 'close'}, inplace=True)
+        df.dropna(inplace=True)
+        self.update_data(False, df)
+        self.offset += chunksize
+
     def get_df(self):
         """Method for returning the DataFrame of market data"""
         return self.df
@@ -176,14 +161,27 @@ class QNetwork(nn.Module):
         return x
 
 
-def preprocess_data(ibkr=False, file_path=''):
-    chunks = load_data(file_path)
-    for chunk in chunks:
-        market = Market(ibkr=ibkr)
-        market.update_data(ibkr, chunk)
-        standardized_df = market.state_df
-        nonstandard_df = market.df
-        yield standardized_df, nonstandard_df
+class LSTMNetwork(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers=2, output_size=3, batch_size=64):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x, h0=None, c0=None):
+        x = x.reshape(1, x.shape[0], x.shape[1])
+        seq_len, batch_size, input_size = x.size()
+
+        if h0 is None:
+            h0 = torch.zeros(self.num_layers, seq_len, self.hidden_size).to(x.device)
+        if c0 is None:
+            c0 = torch.zeros(self.num_layers, seq_len, self.hidden_size).to(x.device)
+
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out)
+        return out.squeeze(0)
 
 
 class TradingAgent:
@@ -235,11 +233,11 @@ class TradingAgent:
         batch = self.replay_buffer.sample(self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
-        states = torch.FloatTensor(np.array(states)).to(device)  # Change here
-        actions = torch.LongTensor(np.array(actions)).unsqueeze(1).to(device)  # Change here
-        rewards = torch.FloatTensor(np.array(rewards)).unsqueeze(1).to(device)  # Change here
-        next_states = torch.FloatTensor(np.array(next_states)).to(device)  # Change here
-        dones = torch.FloatTensor(np.array(dones)).unsqueeze(1).to(device)  # Change here
+        states = torch.FloatTensor(np.array(states)).to(device)
+        actions = torch.LongTensor(np.array(actions)).unsqueeze(1).to(device)
+        rewards = torch.FloatTensor(np.array(rewards)).unsqueeze(1).to(device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(device)
+        dones = torch.FloatTensor(np.array(dones)).unsqueeze(1).to(device)
 
         q_values = self.q_net(states).gather(1, actions)
         next_q_values = self.target_net(next_states).detach().max(1)[0].unsqueeze(1)
@@ -265,10 +263,6 @@ class TradingAgent:
         # Save the model
         torch.save(self.q_net.state_dict(), file_path)
 
-        # Check the file size of the saved model
-        file_size = os.path.getsize(file_path)
-        print(f"Model saved with file size: {file_size} bytes")
-
     def load_model(self, file_path):
         print(file_path)
         try:
@@ -291,31 +285,48 @@ def main():
         agent.save_model(pre_trained_model_path)
         sys.exit(0)
 
+    iteration = 100
     # Register the signal handler
     signal.signal(signal.SIGINT, signal_handler)
-    data_generator = preprocess_data(ibkr=False, file_path=r".\CL_ticks.db")
-    data, _ = next(data_generator)
-    input_size = data.shape[1]
-    output_size = 3  # Hold, Buy (Long), or Sell (Short)
-    agent = TradingAgent(input_size, output_size)
 
-    # Load a pre-trained model before starting the training loop, if it exists
-    pre_trained_model_path = r".\model.pth"
-    agent.load_model(pre_trained_model_path)
+    # Instantiate the Market class
+    market = Market(database_path=r'.\NQ_ticks.db')
 
-    # Load the saved replay buffer, if it exists
-    replay_buffer_file_path = r".\replay_buffer.pkl"
-    agent.load_replay_buffer(replay_buffer_file_path)
+    # Set the table_name and chunksize
+    table_name = 'NQ_market_depth'
+    chunksize = 10000
 
-    starting_balance = 1000000
-    log_file = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S") + ".csv"
-    with open(log_file, mode='w') as f:
-        f.write(
-            "Iteration, Balance Before, Close Price Before, Action, Contracts, Position, Reward, Balance After, "
-            "Close Price After\n")
-    try:
+    while True:
+        # Load a chunk of data using the load_data_chunk method
+        market.load_data_chunk(table_name, table_name, chunksize)
+
+        # Check if there are no more chunks left in the .db file
+        if market.df.empty:
+            break
+        input_size = market.state_df.shape[1]
+        output_size = 3  # Hold, Buy (Long), or Sell (Short)
+        agent = TradingAgent(input_size, output_size)
+
+        # Load a pre-trained model before starting the training loop, if it exists
+        pre_trained_model_path = r".\model.pth"
+        agent.load_model(pre_trained_model_path)
+
+        # Load the saved replay buffer, if it exists
+        replay_buffer_file_path = r".\replay_buffer.pkl"
+        agent.load_replay_buffer(replay_buffer_file_path)
+
+        starting_balance = 1000000
         episode = 0
-        for data, df in data_generator:
+
+        for ep in range(iteration):  # Train for iterations episodes per chunk
+
+            if iteration > 25:
+                iteration -= 5
+
+            # Generate preprocessed data
+            data = market.state_df
+            df = market.df
+
             state = data.iloc[0]
             price = df.iloc[0]
             total_reward = 0
@@ -327,6 +338,14 @@ def main():
             num_contracts = 0
             trade_profit_standard = 0
             trade_profit_nonstandard = 0
+            log_file = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S") + ".csv"
+            log_file = os.path.join(r'.\trades_logs', log_file)
+            with open(log_file, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    ['Iteration', 'Close Price Before', 'Action', 'Position', 'Contracts', 'Reward', 'Total PNL',
+                     'Balance After', 'Close Price After'])
+
             for t in range(len(data)):
                 action, new_num_contracts = agent.choose_action(state, price, account_balance)
                 next_state = data.iloc[t]
@@ -353,8 +372,8 @@ def main():
                     trade_profit_standard = (entry_price_standard - next_price['close'])
                     trade_profit_nonstandard = (entry_price_nonstandard - next_price['close'])
 
-                reward += trade_profit_standard
-                account_balance += trade_profit_nonstandard
+                reward += (trade_profit_standard*num_contracts)
+                account_balance += (trade_profit_nonstandard*20*num_contracts)
 
                 done = (t == len(data) - 1)
                 experience = (state.values, action, reward, next_state.values, done)
@@ -365,36 +384,41 @@ def main():
                 total_reward += reward
                 total_reward_nonstandard += trade_profit_nonstandard
 
+                with open(log_file, mode='a') as f:
+                    f.write(
+                        f"{episode},{price['close']},{action},{position},"
+                        f"{num_contracts},{reward},"
+                        f"{(trade_profit_nonstandard*20*num_contracts)},"
+                        f"{account_balance},{next_price['close']}\n")
+
                 if done:
                     rewards = [experience[2] for experience in agent.replay_buffer.buffer]
                     std_dev = np.std(rewards)
                     print(
                         f"Episode: {episode}, action: {action}, Total Reward: {total_reward}, Final Balance: "
-                        f"{account_balance}, Epsilon: {agent.epsilon}, Standard Deviation: {std_dev}, ")
+                        f"{account_balance}, Epsilon: {agent.epsilon}, Standard Deviation: {std_dev}")
                     agent.update_epsilon()
-                    if episode % 10 == 0:
+
+                    # Training for 100 episodes on the current chunk
+                    if episode % 100 == 0:
                         agent.update_target_net()
 
                     # Logging
-                    with open(log_file, mode='a') as f:
-                        f.write(
-                            f"{episode},{account_balance - trade_profit_standard},{price['close']},{action},{num_contracts},"
-                            f"{position},{reward},{account_balance},{next_price['close']}\n")
+                    print(
+                        f"{episode},{price['close']},{action},{position},"
+                        f"{num_contracts},{reward},{(trade_profit_standard*num_contracts)},"
+                        f"{(trade_profit_nonstandard*20*num_contracts)},"
+                        f"{account_balance},{next_price['close']}\n")
 
                     episode += 1
 
             # Save the trained model after the last episode
             agent.save_model(pre_trained_model_path)
-            agent.save_replay_buffer(pre_trained_model_path)
+            agent.save_replay_buffer(replay_buffer_file_path)
 
-    except KeyboardInterrupt:
-        print("KeyboardInterrupt caught, saving the model before exiting.")
-
-    finally:
-        agent.save_model(pre_trained_model_path)
-        agent.save_replay_buffer(pre_trained_model_path)
+    print("Training finished.")
 
 
 if __name__ == "__main__":
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     main()
